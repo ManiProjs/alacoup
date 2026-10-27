@@ -79,6 +79,8 @@ Install the compiler before running `doctor` on a fresh machine. If Alaco is alr
 | `alacoup check` | Check the latest stable compiler release and platform support. |
 | `alacoup latest` | Print the latest stable Alaco version. |
 | `alacoup self-update` | Check GitHub for a newer AlacoUp release. If one is available, print its release notes and installer instructions. |
+| `alacoup upgrade` | Download, verify, and install the latest AlacoUp release. |
+| `alacoup upgrade --check` | Check for a newer AlacoUp release without installing it. |
 | `alacoup install [version]` | Install the latest release or a specific version, such as `0.1.0`. |
 | `alacoup install --binary-only` | Install/update the compiler binary without replacing the standard library. |
 | `alacoup doctor` | Check the installed compiler, standard library, and common native tools. |

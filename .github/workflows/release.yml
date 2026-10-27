@@ -65,6 +65,9 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - name: Generate release checksums
+        shell: bash
+        run: cd dist && sha256sum alacoup-* > SHA256SUMS
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

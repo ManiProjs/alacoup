@@ -54,6 +54,12 @@ enum CommandLine {
     Latest,
     /// Check GitHub for a newer AlacoUp release.
     SelfUpdate,
+    /// Download and install the latest AlacoUp release.
+    Upgrade {
+        /// Only check whether an update is available; do not install it.
+        #[arg(long)]
+        check: bool,
+    },
     /// Show the install paths used by AlacoUp.
     Paths,
     /// Check the installed compiler and native build prerequisites.
@@ -149,6 +155,175 @@ fn check_self_update() -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn upgrade_alacoup(check_only: bool) -> Result<()> {
+    let current = env!("CARGO_PKG_VERSION");
+    let response = client()?
+        .get(ALACOUP_LATEST_RELEASE)
+        .send()
+        .context("could not check for AlacoUp upgrades")?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        info("No AlacoUp releases have been published yet.");
+        return Ok(());
+    }
+    ensure!(
+        response.status().is_success(),
+        "GitHub upgrade check failed: HTTP {}",
+        response.status()
+    );
+    let release: GitHubRelease = response
+        .json()
+        .context("GitHub returned an invalid release response")?;
+    let latest = release
+        .tag_name
+        .strip_prefix('v')
+        .unwrap_or(&release.tag_name);
+    ensure!(
+        is_valid_version(latest),
+        "GitHub returned an invalid AlacoUp release tag"
+    );
+    if latest == current {
+        success(format!("AlacoUp {current} is already the latest release."));
+        return Ok(());
+    }
+    info(format!(
+        "AlacoUp {latest} is available (you have {current})."
+    ));
+    if check_only {
+        println!("Release notes: {}", release.html_url);
+        return Ok(());
+    }
+
+    let executable =
+        env::current_exe().context("could not locate the running AlacoUp executable")?;
+    let managed_bin = alacoup_home()?.join("bin");
+    ensure!(
+        executable.parent() == Some(managed_bin.as_path()),
+        "self-upgrade only replaces an AlacoUp binary installed in {}; use the bootstrap installer or your package manager for this installation",
+        managed_bin.display()
+    );
+    let target = current_target()?;
+    let archive = if cfg!(windows) {
+        format!("alacoup-{target}.zip")
+    } else {
+        format!("alacoup-{target}.tar.gz")
+    };
+    let base = format!(
+        "https://github.com/ManiProjs/alacoup/releases/download/{}",
+        release.tag_name
+    );
+    let http = client()?;
+    let sums_response = http
+        .get(format!("{base}/SHA256SUMS"))
+        .send()
+        .context("could not download release checksums")?;
+    ensure!(
+        sums_response.status().is_success(),
+        "release checksums request failed: HTTP {}",
+        sums_response.status()
+    );
+    let sums = sums_response
+        .text()
+        .context("could not read release checksums")?;
+    let expected = sums
+        .lines()
+        .find_map(|line| {
+            let mut parts = line.split_whitespace();
+            let hash = parts.next()?;
+            let filename = parts.next()?.trim_start_matches('*');
+            (filename == archive && hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+                .then(|| hash.to_owned())
+        })
+        .context("release checksums did not contain the expected platform archive")?;
+
+    let stage = tempfile::Builder::new()
+        .prefix("alacoup-upgrade-")
+        .tempdir_in(&managed_bin)
+        .context("could not create upgrade staging directory")?;
+    let archive_path = stage.path().join(&archive);
+    let mut response = http
+        .get(format!("{base}/{archive}"))
+        .send()
+        .context("could not download the AlacoUp release archive")?;
+    ensure!(
+        response.status().is_success(),
+        "release archive request failed: HTTP {}",
+        response.status()
+    );
+    let mut file = File::create(&archive_path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 32 * 1024];
+    loop {
+        let read = response.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        io::Write::write_all(&mut file, &buffer[..read])?;
+    }
+    verify_sha256(&archive, &expected, &format!("{:x}", hasher.finalize()))?;
+    let extracted = stage.path().join("extracted");
+    fs::create_dir_all(&extracted)?;
+    #[cfg(not(windows))]
+    extract_archive(&archive_path, &extracted)?;
+    #[cfg(windows)]
+    {
+        let status = Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command"])
+            .arg(format!(
+                "Expand-Archive -LiteralPath '{}' -DestinationPath '{}' -Force",
+                powershell_quote(&archive_path),
+                powershell_quote(&extracted)
+            ))
+            .status()
+            .context("could not extract the upgrade archive with PowerShell")?;
+        ensure!(
+            status.success(),
+            "could not extract the AlacoUp upgrade archive"
+        );
+    }
+    let binary_name = if cfg!(windows) {
+        "alacoup.exe"
+    } else {
+        "alacoup"
+    };
+    let replacement = extracted.join(binary_name);
+    ensure!(
+        replacement.is_file(),
+        "release archive did not contain {binary_name}"
+    );
+    let staged_binary = managed_bin.join(if cfg!(windows) {
+        "alacoup.exe.new"
+    } else {
+        ".alacoup.new"
+    });
+    fs::copy(&replacement, &staged_binary).context("could not stage the upgraded executable")?;
+    #[cfg(unix)]
+    fs::rename(&staged_binary, &executable)
+        .context("could not activate the upgraded executable")?;
+    #[cfg(windows)]
+    {
+        let script = managed_bin.join("alacoup-upgrade.cmd");
+        let current = executable.to_string_lossy().replace('"', "\"\"");
+        let staged = staged_binary.to_string_lossy().replace('"', "\"\"");
+        fs::write(
+            &script,
+            format!(
+                "@echo off\r\ntimeout /t 2 /nobreak >nul\r\nmove /Y \"{staged}\" \"{current}\" >nul\r\ndel \"%~f0\"\r\n"
+            ),
+        )?;
+        Command::new("cmd.exe").args(["/C", "start", "", "/MIN"]).arg(&script).spawn().context("could not schedule replacement of the running executable; staged file remains available")?;
+    }
+    success(format!(
+        "Upgraded AlacoUp to {latest}. Restart your terminal command to use the new version."
+    ));
+    Ok(())
+}
+
+#[cfg(windows)]
+fn powershell_quote(path: &Path) -> String {
+    path.to_string_lossy().replace('\'', "''")
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -876,6 +1051,7 @@ fn run() -> Result<ExitCode> {
         }
         CommandLine::Latest => println!("{}", fetch_manifest(None)?.version),
         CommandLine::SelfUpdate => check_self_update()?,
+        CommandLine::Upgrade { check } => upgrade_alacoup(check)?,
         CommandLine::Install {
             version,
             binary_only,
