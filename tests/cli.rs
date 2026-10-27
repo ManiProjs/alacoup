@@ -123,6 +123,21 @@ fn unknown_command_without_arguments_returns_a_useful_error() {
 }
 
 #[test]
+fn generates_bash_completions_for_manager_commands() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("manager");
+    let path = temp.path().join("empty-path");
+    fs::create_dir(&path).unwrap();
+
+    let output = run(&home, &path, &["completions", "bash"]);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("alacoup"), "{stdout}");
+    assert!(stdout.contains("install"), "{stdout}");
+    assert!(stdout.contains("upgrade"), "{stdout}");
+}
+
+#[test]
 fn non_executable_compiler_reports_spawn_failure() {
     let temp = TempDir::new().unwrap();
     let home = temp.path().join("manager");

@@ -93,6 +93,7 @@ Install the compiler before running `doctor` on a fresh machine. If Alaco is alr
 | `alacoup install --force` | Re-download and replace an already installed version after validation. |
 | `alacoup doctor` | Check platform support, compiler/version, standard library, PATH, native tools, and AlacoUp updates. The network update check is best-effort and does not fail offline runs. |
 | `alacoup paths` | Print manager and standard-library paths. |
+| `alacoup completions <shell>` | Generate completions for Bash, Elvish, Fish, PowerShell, or Zsh. |
 | `alacoup exec <command> [args…]` | Forward a command to Alaco, including `check`. |
 | `alacoup <compiler-command> [args…]` | Forward other compiler commands directly. |
 
@@ -107,6 +108,38 @@ alacoup run
 ```
 
 The compiler's `test` command expects `.aco` test programs under `tests/`, or a test file/directory passed explicitly. It exits unsuccessfully if no tests are discovered.
+
+### Shell completions
+
+Generate completions into the standard location for your shell:
+
+```sh
+# Bash
+alacoup completions bash > ~/.local/share/bash-completion/completions/alacoup
+
+# Zsh (add `fpath=(~/.zfunc $fpath)` to ~/.zshrc once)
+mkdir -p ~/.zfunc
+alacoup completions zsh > ~/.zfunc/_alacoup
+
+# Fish
+alacoup completions fish > ~/.config/fish/completions/alacoup.fish
+```
+
+For PowerShell, add `alacoup completions powershell | Out-String | Invoke-Expression` to your PowerShell profile. Elvish is supported with `alacoup completions elvish`.
+
+### Common workflows
+
+```sh
+alacoup check                         # Check stable release/platform support
+alacoup install                       # Install latest stable Alaco
+alacoup install --channel preview     # Install latest preview release
+alacoup list                          # List installed versions
+alacoup use 0.1.0                     # Activate an installed version
+alacoup uninstall 0.0.9               # Remove an inactive version
+alacoup upgrade --check               # Check for an AlacoUp update
+alacoup upgrade                       # Upgrade AlacoUp itself
+alacoup doctor                        # Diagnose the local environment
+```
 
 ## Installation paths and configuration
 

@@ -9,7 +9,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use flate2::read::GzDecoder;
 use indicatif::{ProgressBar, ProgressStyle};
 use owo_colors::OwoColorize;
@@ -78,6 +78,11 @@ enum CommandLine {
     },
     /// Show the install paths used by AlacoUp.
     Paths,
+    /// Generate shell completion scripts (bash, elvish, fish, powershell, or zsh).
+    Completions {
+        /// Shell to generate completions for.
+        shell: clap_complete::Shell,
+    },
     /// Check the installed compiler and native build prerequisites.
     Doctor,
     /// Run a compiler command explicitly, including commands that share a manager command name.
@@ -1460,6 +1465,9 @@ fn run() -> Result<ExitCode> {
                 "Standard library: {}",
                 alaco_home()?.join("stdlib").display()
             );
+        }
+        CommandLine::Completions { shell } => {
+            clap_complete::generate(shell, &mut Cli::command(), "alacoup", &mut io::stdout());
         }
     }
     Ok(ExitCode::SUCCESS)
