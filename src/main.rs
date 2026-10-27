@@ -1378,14 +1378,14 @@ fn install_launcher(bin_dir: &Path, version_dir: &Path, binary_name: &str) -> Re
         fs::rename(&launcher, &backup).context("could not back up existing compiler launcher")?;
     }
     if let Err(error) = fs::rename(&staged, &launcher) {
-        if backup.exists() {
-            if let Err(restore_error) = fs::rename(&backup, &launcher) {
-                return Err(error).with_context(|| {
-                    format!(
-                        "could not install compiler launcher; rollback also failed: {restore_error}"
-                    )
-                });
-            }
+        if backup.exists()
+            && let Err(restore_error) = fs::rename(&backup, &launcher)
+        {
+            return Err(error).with_context(|| {
+                format!(
+                    "could not install compiler launcher; rollback also failed: {restore_error}"
+                )
+            });
         }
         return Err(error).context("could not install compiler launcher");
     }
