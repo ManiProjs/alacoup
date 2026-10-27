@@ -2,7 +2,7 @@ use std::{
     env,
     ffi::OsString,
     fs::{self, File},
-    io::{self, Read},
+    io::{self, IsTerminal, Read},
     path::{Path, PathBuf},
     process::{Command, ExitCode},
     time::Duration,
@@ -11,6 +11,8 @@ use std::{
 use anyhow::{Context, Result, bail, ensure};
 use clap::{Parser, Subcommand};
 use flate2::read::GzDecoder;
+use indicatif::{ProgressBar, ProgressStyle};
+use owo_colors::OwoColorize;
 use reqwest::blocking::Client;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -18,6 +20,8 @@ use tar::Archive;
 
 const LATEST_MANIFEST: &str =
     "https://github.com/ManiProjs/alaco/releases/latest/download/alacoup-manifest.json";
+const ALACOUP_LATEST_RELEASE: &str =
+    "https://api.github.com/repos/ManiProjs/alacoup/releases/latest";
 const VERSION_MANIFEST: &str =
     "https://github.com/ManiProjs/alaco/releases/download/v{version}/alacoup-manifest.json";
 const MAX_ARCHIVE_ENTRIES: usize = 100_000;
@@ -48,6 +52,8 @@ enum CommandLine {
     },
     /// Print the latest stable version without installing it.
     Latest,
+    /// Check GitHub for a newer AlacoUp release.
+    SelfUpdate,
     /// Show the install paths used by AlacoUp.
     Paths,
     /// Check the installed compiler and native build prerequisites.
@@ -74,6 +80,75 @@ struct Manifest {
     channel: String,
     stdlib: Asset,
     targets: std::collections::BTreeMap<String, TargetAssets>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubRelease {
+    tag_name: String,
+    html_url: String,
+}
+
+fn color_enabled() -> bool {
+    io::stdout().is_terminal() && env::var_os("NO_COLOR").is_none()
+}
+
+fn success(message: impl std::fmt::Display) {
+    if color_enabled() {
+        println!("{}", format!("✓ {message}").green().bold());
+    } else {
+        println!("✓ {message}");
+    }
+}
+
+fn info(message: impl std::fmt::Display) {
+    if color_enabled() {
+        println!("{}", format!("› {message}").cyan());
+    } else {
+        println!("› {message}");
+    }
+}
+
+fn check_self_update() -> Result<()> {
+    let current = env!("CARGO_PKG_VERSION");
+    let response = client()?
+        .get(ALACOUP_LATEST_RELEASE)
+        .send()
+        .context("could not check for AlacoUp updates")?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        info(
+            "No AlacoUp releases have been published yet; update checks will work after the first release.",
+        );
+        return Ok(());
+    }
+    ensure!(
+        response.status().is_success(),
+        "AlacoUp update check failed: HTTP {}",
+        response.status()
+    );
+    let release: GitHubRelease = response
+        .json()
+        .context("GitHub returned an invalid AlacoUp release response")?;
+    let latest = release
+        .tag_name
+        .strip_prefix('v')
+        .unwrap_or(&release.tag_name);
+    ensure!(
+        is_valid_version(latest),
+        "GitHub returned an invalid AlacoUp release tag"
+    );
+    println!("AlacoUp {current}");
+    if latest == current {
+        success(format!("You're up to date (latest: {latest})."));
+    } else {
+        info(format!(
+            "AlacoUp {latest} is available (you have {current})."
+        ));
+        println!("Release notes: {}", release.html_url);
+        println!(
+            "Update with the latest installer from https://github.com/ManiProjs/alacoup#install-alacoup-and-alaco"
+        );
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -271,7 +346,7 @@ fn alaco_home() -> Result<PathBuf> {
 }
 
 fn download_asset(client: &Client, asset: &Asset, destination: &Path) -> Result<()> {
-    println!("Downloading {}", asset.filename);
+    info(format!("Downloading {}", asset.filename));
     let mut response = client
         .get(&asset.url)
         .send()
@@ -296,6 +371,25 @@ fn download_asset(client: &Client, asset: &Asset, destination: &Path) -> Result<
     }
     let mut file = File::create(destination)
         .with_context(|| format!("cannot create {}", destination.display()))?;
+    let progress = if io::stderr().is_terminal() {
+        let progress = response
+            .content_length()
+            .map(ProgressBar::new)
+            .unwrap_or_else(ProgressBar::new_spinner);
+        let template = if env::var_os("NO_COLOR").is_none() {
+            "  {spinner:.green} [{bar:32.cyan/blue}] {bytes}/{total_bytes} ({eta})"
+        } else {
+            "  {spinner} [{bar:32}] {bytes}/{total_bytes} ({eta})"
+        };
+        let style = ProgressStyle::with_template(template)
+            .unwrap_or_else(|_| ProgressStyle::default_bar())
+            .progress_chars("━━╸─");
+        progress.set_style(style);
+        progress.set_message(asset.filename.clone());
+        Some(progress)
+    } else {
+        None
+    };
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 32 * 1024];
     let mut downloaded = 0_u64;
@@ -305,6 +399,9 @@ fn download_asset(client: &Client, asset: &Asset, destination: &Path) -> Result<
             break;
         }
         downloaded = downloaded.saturating_add(read as u64);
+        if let Some(progress) = &progress {
+            progress.set_position(downloaded);
+        }
         ensure!(
             downloaded <= MAX_ARCHIVE_BYTES,
             "download for {} exceeds the 1 GiB size limit",
@@ -315,6 +412,10 @@ fn download_asset(client: &Client, asset: &Asset, destination: &Path) -> Result<
     }
     let actual = format!("{:x}", hasher.finalize());
     verify_sha256(&asset.filename, &asset.sha256, &actual)?;
+    if let Some(progress) = progress {
+        progress.finish_and_clear();
+    }
+    success(format!("Downloaded and verified {}", asset.filename));
     Ok(())
 }
 
@@ -373,10 +474,10 @@ fn extract_archive(archive_path: &Path, destination: &Path) -> Result<()> {
 fn install(version: Option<&str>, binary_only: bool) -> Result<()> {
     let manifest = fetch_manifest(version)?;
     let (target, assets) = manifest.target()?;
-    println!(
+    info(format!(
         "Alaco {} ({target}, {})",
         manifest.version, manifest.channel
-    );
+    ));
 
     let home = alacoup_home()?;
     let versions_dir = home.join("versions");
@@ -483,11 +584,11 @@ fn install(version: Option<&str>, binary_only: bool) -> Result<()> {
     // its backup is intentionally discarded only after this commit point.
     drop(stdlib_transaction);
 
-    println!(
+    success(format!(
         "Installed Alaco {} to {}",
         manifest.version,
         version_dir.display()
-    );
+    ));
     println!("Launcher: {}", bin_dir.join(binary_name).display());
     if binary_only {
         println!(
@@ -774,6 +875,7 @@ fn run() -> Result<ExitCode> {
             }
         }
         CommandLine::Latest => println!("{}", fetch_manifest(None)?.version),
+        CommandLine::SelfUpdate => check_self_update()?,
         CommandLine::Install {
             version,
             binary_only,
@@ -816,7 +918,11 @@ fn main() -> ExitCode {
     match run() {
         Ok(code) => code,
         Err(error) => {
-            eprintln!("error: {error:#}");
+            if io::stderr().is_terminal() && env::var_os("NO_COLOR").is_none() {
+                eprintln!("{}", format!("✗ error: {error:#}").red().bold());
+            } else {
+                eprintln!("error: {error:#}");
+            }
             ExitCode::FAILURE
         }
     }

@@ -7,6 +7,8 @@
 ## Features
 
 - Install the latest stable Alaco release or choose an exact version.
+- Use colored status messages and a download progress bar in interactive terminals (plain output remains available for pipes and `NO_COLOR`).
+- Check whether a newer AlacoUp manager release is available with `alacoup self-update`.
 - Verify downloaded release assets against the SHA-256 values in Alaco's release manifest.
 - Keep compiler versions in separate versioned directories.
 - Check the installation and common native build tools with `doctor`.
@@ -76,6 +78,7 @@ Install the compiler before running `doctor` on a fresh machine. If Alaco is alr
 | `alacoup --version` | Print the AlacoUp version. |
 | `alacoup check` | Check the latest stable compiler release and platform support. |
 | `alacoup latest` | Print the latest stable Alaco version. |
+| `alacoup self-update` | Check GitHub for a newer AlacoUp release. If one is available, print its release notes and installer instructions. |
 | `alacoup install [version]` | Install the latest release or a specific version, such as `0.1.0`. |
 | `alacoup install --binary-only` | Install/update the compiler binary without replacing the standard library. |
 | `alacoup doctor` | Check the installed compiler, standard library, and common native tools. |
