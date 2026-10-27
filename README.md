@@ -7,6 +7,8 @@
 ## Features
 
 - Install the latest stable Alaco release or choose an exact version.
+- Keep multiple compiler versions installed, switch between them, and remove inactive versions.
+- Install published preview builds with `alacoup install --channel preview`.
 - Use colored status messages and a download progress bar in interactive terminals (plain output remains available for pipes and `NO_COLOR`).
 - Check whether a newer AlacoUp manager release is available with `alacoup self-update`.
 - Verify downloaded release assets against the SHA-256 values in Alaco's release manifest.
@@ -82,6 +84,11 @@ Install the compiler before running `doctor` on a fresh machine. If Alaco is alr
 | `alacoup upgrade` | Download, verify, and install the latest AlacoUp release. |
 | `alacoup upgrade --check` | Check for a newer AlacoUp release without installing it. |
 | `alacoup install [version]` | Install the latest release or a specific version, such as `0.1.0`. |
+| `alacoup install --channel preview` | Install the latest published preview release. |
+| `alacoup list` | List locally installed compiler versions; `*` marks the active version. |
+| `alacoup list --available` | List published stable and preview releases. |
+| `alacoup use <version>` | Switch the active compiler and its bundled standard library to an installed version. |
+| `alacoup uninstall <version>` | Remove an installed version that is not active. |
 | `alacoup install --binary-only` | Install/update the compiler binary without replacing the standard library. |
 | `alacoup doctor` | Check the installed compiler, standard library, and common native tools. |
 | `alacoup paths` | Print manager and standard-library paths. |

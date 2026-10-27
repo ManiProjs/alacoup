@@ -9,7 +9,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use flate2::read::GzDecoder;
 use indicatif::{ProgressBar, ProgressStyle};
 use owo_colors::OwoColorize;
@@ -46,10 +46,23 @@ enum CommandLine {
     Install {
         /// Optional exact release version.
         version: Option<String>,
+        /// Release channel to install when no exact version is supplied.
+        #[arg(long, value_enum, default_value_t = ReleaseChannel::Stable)]
+        channel: ReleaseChannel,
         /// Install the binary without replacing the standard library.
         #[arg(long)]
         binary_only: bool,
     },
+    /// List installed Alaco versions, or published versions with --available.
+    List {
+        /// List published stable and preview releases instead of local installations.
+        #[arg(long)]
+        available: bool,
+    },
+    /// Activate an already installed Alaco version.
+    Use { version: String },
+    /// Remove an installed Alaco version that is not currently active.
+    Uninstall { version: String },
     /// Print the latest stable version without installing it.
     Latest,
     /// Check GitHub for a newer AlacoUp release.
@@ -78,6 +91,12 @@ enum CommandLine {
     Compiler(Vec<OsString>),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ReleaseChannel {
+    Stable,
+    Preview,
+}
+
 #[derive(Debug, Deserialize)]
 struct Manifest {
     schema_version: u32,
@@ -92,6 +111,10 @@ struct Manifest {
 struct GitHubRelease {
     tag_name: String,
     html_url: String,
+    #[serde(default)]
+    prerelease: bool,
+    #[serde(default)]
+    draft: bool,
 }
 
 fn color_enabled() -> bool {
@@ -503,6 +526,227 @@ fn fetch_manifest(version: Option<&str>) -> Result<Manifest> {
     Ok(manifest)
 }
 
+fn github_releases() -> Result<Vec<GitHubRelease>> {
+    let response = client()?
+        .get("https://api.github.com/repos/ManiProjs/alaco/releases?per_page=100")
+        .send()
+        .context("could not fetch published Alaco releases")?;
+    ensure!(
+        response.status().is_success(),
+        "Alaco releases request failed: HTTP {}",
+        response.status()
+    );
+    response
+        .json()
+        .context("GitHub returned an invalid Alaco releases response")
+}
+
+fn latest_preview_version() -> Result<String> {
+    let releases = github_releases()?;
+    releases
+        .into_iter()
+        .find(|release| {
+            release.prerelease
+                && !release.draft
+                && is_valid_version(
+                    release
+                        .tag_name
+                        .strip_prefix('v')
+                        .unwrap_or(&release.tag_name),
+                )
+        })
+        .map(|release| {
+            release
+                .tag_name
+                .strip_prefix('v')
+                .unwrap_or(&release.tag_name)
+                .to_owned()
+        })
+        .context("no published Alaco preview releases were found")
+}
+
+fn version_directories() -> Result<Vec<(String, PathBuf)>> {
+    let root = alacoup_home()?.join("versions");
+    if !root.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut versions = Vec::new();
+    for entry in
+        fs::read_dir(&root).with_context(|| format!("could not read {}", root.display()))?
+    {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let directory = entry.path();
+        let payload = directory.join("payload");
+        if !payload.is_dir() {
+            continue;
+        }
+        let version = fs::read_to_string(directory.join("version.txt"))
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .or_else(|| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|name| name.split_once('-').map(|(version, _)| version.to_owned()))
+            });
+        if let Some(version) = version.filter(|version| is_valid_version(version)) {
+            versions.push((version, payload));
+        }
+    }
+    versions.sort_by(|a, b| version_cmp(&a.0, &b.0));
+    Ok(versions)
+}
+
+fn version_cmp(left: &str, right: &str) -> std::cmp::Ordering {
+    fn components(value: &str) -> (Vec<u64>, bool, String) {
+        let core = value.split(['-', '+']).next().unwrap_or(value);
+        let numbers = core
+            .split('.')
+            .map(|part| part.parse().unwrap_or(0))
+            .collect();
+        (numbers, value.contains('-'), value.to_owned())
+    }
+    let (a, a_pre, a_full) = components(left);
+    let (b, b_pre, b_full) = components(right);
+    a.cmp(&b)
+        .then_with(|| a_pre.cmp(&b_pre).reverse())
+        .then_with(|| a_full.cmp(&b_full))
+}
+
+fn list_versions(available: bool) -> Result<()> {
+    if available {
+        for release in github_releases()?
+            .into_iter()
+            .filter(|release| !release.draft)
+        {
+            let version = release
+                .tag_name
+                .strip_prefix('v')
+                .unwrap_or(&release.tag_name);
+            if is_valid_version(version) {
+                println!(
+                    "{version}  {}",
+                    if release.prerelease {
+                        "preview"
+                    } else {
+                        "stable"
+                    }
+                );
+            }
+        }
+        return Ok(());
+    }
+    let active = fs::read_to_string(alacoup_home()?.join("active-version")).unwrap_or_default();
+    let versions = version_directories()?;
+    if versions.is_empty() {
+        info("No Alaco versions are installed. Run `alacoup install`.");
+        return Ok(());
+    }
+    for (version, _) in versions {
+        println!(
+            "{}{version}",
+            if active.trim() == version { "* " } else { "  " }
+        );
+    }
+    println!("* active version");
+    Ok(())
+}
+
+fn activate_version(version: &str) -> Result<()> {
+    let (version, payload) = version_directories()?
+        .into_iter()
+        .find(|(installed, _)| installed == version)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Alaco {version} is not installed; run `alacoup install {version}` first"
+            )
+        })?;
+    let binary_name = if cfg!(windows) { "alaco.exe" } else { "alaco" };
+    ensure!(
+        payload.join(binary_name).is_file(),
+        "Alaco {version} installation is missing its compiler executable"
+    );
+    let stdlib_source = payload.join("std");
+    ensure!(
+        stdlib_source.is_dir(),
+        "Alaco {version} was installed with --binary-only and has no bundled standard library; reinstall it without --binary-only before switching to it"
+    );
+
+    let home = alacoup_home()?;
+    let bin_dir = home.join("bin");
+    fs::create_dir_all(&bin_dir)?;
+    let stdlib = env::var_os("ALACO_STDLIB_DIR")
+        .map(PathBuf::from)
+        .unwrap_or(alaco_home()?.join("stdlib"))
+        .join("std");
+    let parent = stdlib
+        .parent()
+        .context("standard-library path has no parent")?;
+    fs::create_dir_all(parent)?;
+    let transaction = tempfile::Builder::new()
+        .prefix("alacoup-use-")
+        .tempdir_in(parent)?;
+    let backup = transaction.path().join("previous-stdlib");
+    if stdlib.exists() {
+        fs::rename(&stdlib, &backup)
+            .context("could not stage the current standard library for rollback")?;
+    }
+    if let Err(error) = copy_directory(&stdlib_source, &stdlib) {
+        if stdlib.exists() {
+            fs::remove_dir_all(&stdlib)
+                .context("could not remove the failed standard-library activation")?;
+        }
+        if backup.exists() {
+            fs::rename(&backup, &stdlib)
+                .context("standard-library activation failed and rollback failed")?;
+        }
+        return Err(error).context("could not activate the requested standard library");
+    }
+    if let Err(error) = install_launcher(&bin_dir, &payload, binary_name) {
+        if stdlib.exists() {
+            fs::remove_dir_all(&stdlib)
+                .context("could not remove the failed standard library activation")?;
+        }
+        if backup.exists() {
+            fs::rename(&backup, &stdlib)
+                .context("launcher activation failed and standard-library rollback failed")?;
+        }
+        return Err(error).context("could not activate the requested compiler");
+    }
+    fs::write(home.join("active-version"), format!("{version}\n"))?;
+    success(format!("Activated Alaco {version}"));
+    Ok(())
+}
+
+fn uninstall_version(version: &str) -> Result<()> {
+    ensure!(is_valid_version(version), "invalid version '{version}'");
+    let home = alacoup_home()?;
+    let active = fs::read_to_string(home.join("active-version")).unwrap_or_default();
+    ensure!(
+        !active.trim().is_empty(),
+        "the active version is not recorded yet; run `alacoup use <version>` first so AlacoUp can safely protect the active installation"
+    );
+    ensure!(
+        active.trim() != version,
+        "Alaco {version} is active; switch to another version with `alacoup use <version>` before uninstalling it"
+    );
+    let versions = version_directories()?;
+    let (_, payload) = versions
+        .into_iter()
+        .find(|(installed, _)| installed == version)
+        .ok_or_else(|| anyhow::anyhow!("Alaco {version} is not installed"))?;
+    let directory = payload
+        .parent()
+        .context("version payload has no parent directory")?;
+    fs::remove_dir_all(directory)
+        .with_context(|| format!("could not uninstall Alaco {version}"))?;
+    success(format!("Uninstalled Alaco {version}"));
+    Ok(())
+}
+
 fn alacoup_home() -> Result<PathBuf> {
     if let Some(path) = env::var_os("ALACOUP_HOME") {
         return Ok(PathBuf::from(path));
@@ -695,6 +939,10 @@ fn install(version: Option<&str>, binary_only: bool) -> Result<()> {
     fs::rename(&extracted, &staged_version)?;
     let final_version_dir = version_dir.keep();
     let version_dir = final_version_dir.join("payload");
+    fs::write(
+        final_version_dir.join("version.txt"),
+        format!("{}\n", manifest.version),
+    )?;
 
     // Create all required activation directories before touching the live stdlib.
     fs::create_dir_all(&bin_dir)?;
@@ -758,6 +1006,10 @@ fn install(version: Option<&str>, binary_only: bool) -> Result<()> {
     // Keep the transaction directory alive until launcher activation succeeds;
     // its backup is intentionally discarded only after this commit point.
     drop(stdlib_transaction);
+    fs::write(
+        home.join("active-version"),
+        format!("{}\n", manifest.version),
+    )?;
 
     success(format!(
         "Installed Alaco {} to {}",
@@ -1054,8 +1306,23 @@ fn run() -> Result<ExitCode> {
         CommandLine::Upgrade { check } => upgrade_alacoup(check)?,
         CommandLine::Install {
             version,
+            channel,
             binary_only,
-        } => install(version.as_deref(), binary_only)?,
+        } => {
+            ensure!(
+                version.is_none() || channel == ReleaseChannel::Stable,
+                "--channel cannot be combined with an explicit version"
+            );
+            if channel == ReleaseChannel::Preview {
+                let version = latest_preview_version()?;
+                install(Some(&version), binary_only)?;
+            } else {
+                install(version.as_deref(), binary_only)?;
+            }
+        }
+        CommandLine::List { available } => list_versions(available)?,
+        CommandLine::Use { version } => activate_version(&version)?,
+        CommandLine::Uninstall { version } => uninstall_version(&version)?,
         CommandLine::Doctor => {
             return Ok(if doctor()? {
                 ExitCode::SUCCESS
@@ -1181,6 +1448,12 @@ mod tests {
         assert!(!is_valid_version(".."));
         assert!(!is_valid_version("../0.1.0"));
         assert!(!is_valid_version("release"));
+    }
+
+    #[test]
+    fn version_sorting_places_stable_after_its_preview() {
+        assert_eq!(version_cmp("1.2.0-rc.1", "1.2.0"), std::cmp::Ordering::Less);
+        assert_eq!(version_cmp("1.9.0", "1.10.0"), std::cmp::Ordering::Less);
     }
 
     #[test]
