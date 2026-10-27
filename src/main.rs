@@ -1145,12 +1145,52 @@ fn find_program(name: &str) -> Option<PathBuf> {
 fn doctor() -> Result<bool> {
     println!("AlacoUp {}", env!("CARGO_PKG_VERSION"));
     let mut healthy = true;
+    match current_target() {
+        Ok(target) => println!("Platform: {target}"),
+        Err(error) => {
+            healthy = false;
+            println!("Platform: unsupported — {error}");
+        }
+    }
+    let manager_bin = alacoup_home()?.join("bin");
+    println!("AlacoUp bin: {}", manager_bin.display());
+    let in_path = env::var_os("PATH")
+        .map(|path| env::split_paths(&path).any(|entry| entry == manager_bin))
+        .unwrap_or(false);
+    if in_path {
+        println!("PATH: AlacoUp bin directory is present");
+    } else {
+        println!(
+            "PATH: AlacoUp bin directory is missing — add `{}` to PATH to run `alacoup` and `alaco` from any directory",
+            manager_bin.display()
+        );
+    }
+    let active_version =
+        fs::read_to_string(alacoup_home()?.join("active-version")).unwrap_or_default();
+    if active_version.trim().is_empty() {
+        println!(
+            "Active version: not recorded (older installs may need `alacoup use <version>` once)"
+        );
+    } else {
+        println!("Active version: {}", active_version.trim());
+        if !version_directories()?
+            .iter()
+            .any(|(version, _)| version == active_version.trim())
+        {
+            healthy = false;
+            println!("Active version: recorded version is not present in the versions directory");
+        }
+    }
     match compiler_path() {
         Ok(path) => {
             println!("Alaco compiler: {}", path.display());
             match Command::new(&path).arg("--version").output() {
                 Ok(output) if output.status.success() => {
-                    let version = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+                    let version = if output.stdout.is_empty() {
+                        String::from_utf8_lossy(&output.stderr).trim().to_owned()
+                    } else {
+                        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+                    };
                     if version.is_empty() {
                         println!("Compiler version: available (no version text)");
                     } else {
@@ -1204,12 +1244,48 @@ fn doctor() -> Result<bool> {
     if cfg!(target_os = "macos") || cfg!(target_os = "linux") {
         println!("Native Alaco builds normally require clang++.");
     }
+    match manager_update_status() {
+        Some(message) => println!("AlacoUp updates: {message}"),
+        None => println!("AlacoUp updates: could not check (offline or GitHub unavailable)"),
+    }
     if healthy {
         println!("Environment looks ready.");
     } else {
         println!("Environment is incomplete; fix the missing requirements above.");
     }
     Ok(healthy)
+}
+
+fn manager_update_status() -> Option<String> {
+    let response = Client::builder()
+        .user_agent(concat!("AlacoUp/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(3))
+        .build()
+        .ok()?
+        .get(ALACOUP_LATEST_RELEASE)
+        .send()
+        .ok()?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Some("no published release yet".to_owned());
+    }
+    if !response.status().is_success() {
+        return None;
+    }
+    let release: GitHubRelease = response.json().ok()?;
+    let latest = release
+        .tag_name
+        .strip_prefix('v')
+        .unwrap_or(&release.tag_name);
+    if !is_valid_version(latest) {
+        return None;
+    }
+    let current = env!("CARGO_PKG_VERSION");
+    Some(if latest == current {
+        format!("up to date ({current})")
+    } else {
+        format!("{latest} is available; run `alacoup upgrade`")
+    })
 }
 
 fn copy_directory(source: &Path, destination: &Path) -> Result<()> {

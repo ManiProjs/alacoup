@@ -90,7 +90,7 @@ Install the compiler before running `doctor` on a fresh machine. If Alaco is alr
 | `alacoup use <version>` | Switch the active compiler and its bundled standard library to an installed version. |
 | `alacoup uninstall <version>` | Remove an installed version that is not active. |
 | `alacoup install --binary-only` | Install/update the compiler binary without replacing the standard library. |
-| `alacoup doctor` | Check the installed compiler, standard library, and common native tools. |
+| `alacoup doctor` | Check platform support, compiler/version, standard library, PATH, native tools, and AlacoUp updates. The network update check is best-effort and does not fail offline runs. |
 | `alacoup paths` | Print manager and standard-library paths. |
 | `alacoup exec <command> [args…]` | Forward a command to Alaco, including `check`. |
 | `alacoup <compiler-command> [args…]` | Forward other compiler commands directly. |
