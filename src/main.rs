@@ -52,6 +52,9 @@ enum CommandLine {
         /// Install the binary without replacing the standard library.
         #[arg(long)]
         binary_only: bool,
+        /// Re-download and replace an already installed version.
+        #[arg(long)]
+        force: bool,
     },
     /// List installed Alaco versions, or published versions with --available.
     List {
@@ -890,7 +893,7 @@ fn extract_archive(archive_path: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
-fn install(version: Option<&str>, binary_only: bool) -> Result<()> {
+fn install(version: Option<&str>, binary_only: bool, force: bool) -> Result<()> {
     let manifest = fetch_manifest(version)?;
     let (target, assets) = manifest.target()?;
     info(format!(
@@ -902,6 +905,17 @@ fn install(version: Option<&str>, binary_only: bool) -> Result<()> {
     let versions_dir = home.join("versions");
     let bin_dir = home.join("bin");
     fs::create_dir_all(&home)?;
+    let previous_same_version: Vec<PathBuf> = version_directories()?
+        .into_iter()
+        .filter(|(installed, _)| installed == &manifest.version)
+        .filter_map(|(_, payload)| payload.parent().map(Path::to_path_buf))
+        .collect();
+    ensure!(
+        previous_same_version.is_empty() || force,
+        "Alaco {} is already installed; use `alacoup use {}` to activate it or pass `--force` to reinstall it",
+        manifest.version,
+        manifest.version
+    );
     let staging = tempfile::Builder::new()
         .prefix("install-")
         .tempdir_in(&home)
@@ -1010,6 +1024,17 @@ fn install(version: Option<&str>, binary_only: bool) -> Result<()> {
         home.join("active-version"),
         format!("{}\n", manifest.version),
     )?;
+    for previous in previous_same_version {
+        if previous != final_version_dir
+            && let Err(error) = fs::remove_dir_all(&previous)
+        {
+            eprintln!(
+                "warning: Alaco {} is active, but old installation {} could not be removed: {error}",
+                manifest.version,
+                previous.display()
+            );
+        }
+    }
 
     success(format!(
         "Installed Alaco {} to {}",
@@ -1017,9 +1042,15 @@ fn install(version: Option<&str>, binary_only: bool) -> Result<()> {
         version_dir.display()
     ));
     println!("Launcher: {}", bin_dir.join(binary_name).display());
+    println!("Active version: {}", manifest.version);
     if binary_only {
         println!(
             "Standard library unchanged. Set ALACO_STDLIB_DIR if it is installed outside ~/.alaco/stdlib."
+        );
+    } else {
+        println!(
+            "Standard library: {}",
+            alaco_home()?.join("stdlib").display()
         );
     }
     print_path_hint(&bin_dir);
@@ -1384,6 +1415,7 @@ fn run() -> Result<ExitCode> {
             version,
             channel,
             binary_only,
+            force,
         } => {
             ensure!(
                 version.is_none() || channel == ReleaseChannel::Stable,
@@ -1391,9 +1423,9 @@ fn run() -> Result<ExitCode> {
             );
             if channel == ReleaseChannel::Preview {
                 let version = latest_preview_version()?;
-                install(Some(&version), binary_only)?;
+                install(Some(&version), binary_only, force)?;
             } else {
-                install(version.as_deref(), binary_only)?;
+                install(version.as_deref(), binary_only, force)?;
             }
         }
         CommandLine::List { available } => list_versions(available)?,
