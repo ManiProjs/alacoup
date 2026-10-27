@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+            archive: alacoup-aarch64-apple-darwin.tar.gz
+            binary: alacoup
+          - os: macos-13
+            target: x86_64-apple-darwin
+            archive: alacoup-x86_64-apple-darwin.tar.gz
+            binary: alacoup
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: alacoup-x86_64-unknown-linux-gnu.tar.gz
+            binary: alacoup
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: alacoup-x86_64-pc-windows-msvc.zip
+            binary: alacoup.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: Package Unix binary
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir package
+          cp target/${{ matrix.target }}/release/${{ matrix.binary }} package/
+          tar -C package -czf ${{ matrix.archive }} ${{ matrix.binary }}
+      - name: Package Windows binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force package | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary }}" package/
+          Compress-Archive -Path package/${{ matrix.binary }} -DestinationPath ${{ matrix.archive }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive }}
+          path: ${{ matrix.archive }}
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --generate-notes
